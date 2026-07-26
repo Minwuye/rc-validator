@@ -3302,7 +3302,7 @@ const EXAMPLES = {
 const N = v => v === '' || v == null ? undefined : parseFloat(v);
 const NZ = v => {
   const n = N(v);
-  return n === 0 ? undefined : n;
+  return n == null ? undefined : n;  // 0 is a valid input — no longer stripped (Report §3.3 fix)
 };
 function parseForm(form) {
   const g = CONCRETE_OPTS[form.grade] || {};
@@ -4327,6 +4327,10 @@ function calcDCR(demand, capacity) {
 // EC2 BEAM FLEXURE  (EN 1992-1-1 §6.1)
 // ────────────────────────────────────────────────────────────────────
 function calcFlexure_EC2(p) {
+  // Input validation (Report §3.3 / §3.4)
+  if (!p.b || p.b <= 0) return {pass:false,error:'b must be > 0',id:'EC2_flexure',code:'EC2',title:'EC2 Flexure',result:{MRd:0},steps:[],dcr:0};
+  if (!p.d || p.d <= 0) return {pass:false,error:'d must be > 0',id:'EC2_flexure',code:'EC2',title:'EC2 Flexure',result:{MRd:0},steps:[],dcr:0};
+  if (p.rho != null && p.rho < 0) return {pass:false,error:'ρ must be ≥ 0',id:'EC2_flexure',code:'EC2',title:'EC2 Flexure',result:{MRd:0},steps:[],dcr:0};
   const {
     fck = 30,
     fyk = 500,
@@ -4340,7 +4344,7 @@ function calcFlexure_EC2(p) {
   const As = rho * b * d;
   const fcd = 0.85 * fck / gamma_c;
   const fyd = fyk / gamma_s;
-  const a = As * fyd / (0.85 * fcd * b);
+  const a = As * fyd / (fcd * b); // η=1.0 for fck≤50 per EC2 §3.1.7; αcc already in fcd
   const lam = fck <= 50 ? 0.8 : 0.8 - (fck - 50) / 400;
   const x = a / lam;
   const MRd = As * fyd * (d - a / 2) / 1e6; // kNm
@@ -4407,6 +4411,8 @@ function calcFlexure_ACI(p) {
 // BS 8110 BEAM FLEXURE  (§3.4.4)
 // ────────────────────────────────────────────────────────────────────
 function calcFlexure_BS8110(p) {
+  if (!p.b || p.b <= 0) return {pass:false,error:'b must be > 0',id:'BS_flexure',code:'BS8110',title:'BS 8110 Flexure',result:{MRd:0},steps:[],dcr:0};
+  if (!p.d || p.d <= 0) return {pass:false,error:'d must be > 0',id:'BS_flexure',code:'BS8110',title:'BS 8110 Flexure',result:{MRd:0},steps:[],dcr:0};
   const {
     fcu = 37,
     fy = 460,
@@ -4416,10 +4422,15 @@ function calcFlexure_BS8110(p) {
     MEd = 0
   } = p;
   const As = rho * b * d;
-  const K = MEd * 1e6 / (fcu * b * d * d);
+  // K used only for section adequacy check — NOT for computing z (Report §3.1 fix)
+  const K = MEd * 1e6 / (fcu * b * d * d);  // demand ratio for DCR reference
   const Kp = 0.156;
-  const z = d * clamp(0.5 + sq(0.25 - K / 0.9), 0.775, 0.95);
-  const MRd = 0.87 * fy * As * z / 1e6;
+  // MRd from force equilibrium independent of MEd (BS 8110-1 §3.4.4.4)
+  const fyd_bs = 0.87 * fy;
+  const a_bs   = As * fyd_bs / (0.67 * fcu * b);   // = 0.9x (compression block depth)
+  const z_eq   = d - 0.5 * a_bs;                   // lever arm from equilibrium
+  const z      = Math.min(z_eq, 0.95 * d);         // BS 8110 §3.4.4.4 limit
+  const MRd    = fyd_bs * As * z / 1e6;
   const DCR = calcDCR(MEd, MRd);
   return {
     id: 'BS_flexure',
@@ -4457,7 +4468,7 @@ function calcFlexure_JSCE(p) {
   const As = rho * b * d;
   const fcd = fck / gamma_c;
   const fyd = fyk / gamma_s;
-  const a = As * fyd / (0.85 * fcd * b);
+  const a = As * fyd / (fcd * b); // η=1.0 for fck≤50 per EC2 §3.1.7; αcc already in fcd
   const Mud = As * fyd * (d - a / 2) / (gamma_b * 1e6);
   const DCR = calcDCR(MEd, Mud);
   return {
@@ -4480,6 +4491,8 @@ function calcFlexure_JSCE(p) {
 // EC2 SHEAR CAPACITY  (§6.2)
 // ────────────────────────────────────────────────────────────────────
 function calcShear_EC2(p) {
+  if (!p.b || p.b <= 0) return {pass:false,error:'b must be > 0',id:'EC2_shear',code:'EC2',title:'EC2 Shear',result:{VRd:0},steps:[],dcr:0};
+  if (!p.d || p.d <= 0) return {pass:false,error:'d must be > 0',id:'EC2_shear',code:'EC2',title:'EC2 Shear',result:{VRd:0},steps:[],dcr:0};
   const {
     fck = 30,
     fyk = 500,
@@ -4509,7 +4522,12 @@ function calcShear_EC2(p) {
   // Asw/s from rho_shear
   const AswS = rho_shear * bw; // mm²/mm
   const VRds = AswS * z * fywdk * cotT / 1e3; // kN
-  const VRd = Math.min(VRds + VRdc, VRdmax);
+  // EC2 §6.2.3: when shear reinforcement is required,
+  // VRd = min(VRds, VRdmax). VRdc is NOT added to VRds.
+  // VRdc is only the design capacity when no links are required.
+  const VRd_noLinks = VRdc;
+  const VRd_links   = Math.min(VRds, VRdmax);
+  const VRd = VEd <= VRdc ? VRd_noLinks : VRd_links;
   const DCR = calcDCR(VEd, VRd);
   return {
     id: 'EC2_shear',
@@ -4600,7 +4618,7 @@ function calcNM_EC2(p) {
   for (let i = 0; i <= 60; i++) xVals.push(0.001 * h + i * (1.5 * h) / 60);
   for (const x of xVals) {
     const es1 = ecu * (x - dp) / x; // compression steel strain
-    const es2 = ecu * (d - x) / x; // tension steel strain (negative = tension)
+    const es2 = ecu * (x - d) / x; // tension steel strain: negative when d>x (tension zone)
     const ss1 = clamp(es1 * Es, -fyd, fyd); // compression steel stress
     const ss2 = clamp(es2 * Es, -fyd, fyd); // tension steel stress (negative = tension)
     const xeff = clamp(x, 0, h);
